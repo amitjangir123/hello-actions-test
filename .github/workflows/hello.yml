@@ -1,37 +1,17 @@
 
-name: Hello World Test
+name: Test DjPunjab
 
 on:
   workflow_dispatch:
-  schedule:
-    - cron: "*/5 * * * *"
-
-permissions:
-  contents: write
-
-concurrency:
-  group: hello-csv-update
-  cancel-in-progress: false
 
 jobs:
-  hello:
+  test:
     runs-on: ubuntu-latest
 
     steps:
       - name: Download Repository
         uses: actions/checkout@v4
 
-      - name: Run Python Program
-        run: python hello.py
-
-      - name: Save CSV to GitHub
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add history.csv
-          if ! git diff --cached --quiet; then
-            git commit -m "Update CSV history"
-            git push
-          fi
-
+      - name: Test Song Page
+        run: python test_song.py
 
