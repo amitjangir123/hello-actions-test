@@ -16,10 +16,10 @@ from bs4 import BeautifulSoup
 
 BASE = "https://djpunjab.is"
 
-START_ID = 300000
-END_ID = 301000
+START_ID = 0
+END_ID = 300000
 
-DELAY_SECONDS = 0.1
+DELAY_SECONDS = 0.001
 CSV_FILE = "songs.csv"
 
 USER_AGENT = "PersonalMusicCatalogResearch/1.0"
