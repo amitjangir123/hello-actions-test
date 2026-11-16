@@ -1,5 +1,6 @@
 
 import csv
+import json
 import os
 import re
 import time
@@ -16,11 +17,11 @@ from bs4 import BeautifulSoup
 
 BASE = "https://djpunjab.is"
 
-START_ID = 0
-END_ID = 1000
+BATCH_SIZE = 1000
+DELAY_SECONDS = 3
 
-DELAY_SECONDS = 0.001
 CSV_FILE = "songs.csv"
+STATE_FILE = "scan_state.json"
 
 USER_AGENT = "PersonalMusicCatalogResearch/1.0"
 
@@ -47,16 +48,118 @@ def clean(value):
     ).strip()
 
 
+def atomic_write_json(path, data):
+    temp = path + ".tmp"
+
+    with open(temp, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+        f.flush()
+        os.fsync(f.fileno())
+
+    os.replace(temp, path)
+
+
+# ==========================================
+# STATE MANAGEMENT
+# ==========================================
+
+def load_state():
+    if not os.path.exists(STATE_FILE):
+        log("No scan state found. Starting at ID 0.")
+        return 0
+
+    with open(STATE_FILE, encoding="utf-8") as f:
+        state = json.load(f)
+
+    next_id = state.get("next_id")
+
+    if type(next_id) is not int or next_id < 0:
+        raise ValueError("Invalid next_id in scan_state.json")
+
+    log(f"Resuming from ID {next_id}")
+    return next_id
+
+
+def save_state(next_id):
+    atomic_write_json(
+        STATE_FILE,
+        {"next_id": next_id}
+    )
+
+
+# ==========================================
+# CSV DATABASE
+# ==========================================
+
+def load_existing():
+    songs = {}
+
+    if not os.path.exists(CSV_FILE):
+        log("No existing CSV. Creating new database.")
+        return songs
+
+    with open(
+        CSV_FILE, newline="", encoding="utf-8"
+    ) as f:
+        reader = csv.DictReader(f)
+
+        if not reader.fieldnames or not set(FIELDS).issubset(
+            reader.fieldnames
+        ):
+            raise ValueError("Invalid CSV columns")
+
+        for row in reader:
+            sid = row.get("song_id", "")
+
+            if sid.isdigit():
+                songs[sid] = {
+                    field: row.get(field, "")
+                    for field in FIELDS
+                }
+
+    log(f"Loaded {len(songs)} existing songs")
+    return songs
+
+
+def save_csv(songs):
+    temp = CSV_FILE + ".tmp"
+
+    with open(
+        temp, "w", newline="", encoding="utf-8"
+    ) as f:
+        writer = csv.DictWriter(
+            f, fieldnames=FIELDS
+        )
+
+        writer.writeheader()
+
+        for sid in sorted(songs, key=int):
+            writer.writerow(songs[sid])
+
+        f.flush()
+        os.fsync(f.fileno())
+
+    os.replace(temp, CSV_FILE)
+
+
+def checkpoint(songs, next_id):
+    # Write CSV first, then state.
+    # If interrupted between writes, some IDs
+    # may be rescanned, but valid records remain.
+    save_csv(songs)
+    save_state(next_id)
+
+    log(
+        f"CHECKPOINT | Next ID: {next_id} | "
+        f"Songs: {len(songs)}"
+    )
+
+
+# ==========================================
+# HTML PARSING
+# ==========================================
+
 def get_labeled_value(soup, label):
-    """
-    Extract fields from DjPunjab pages:
-
-    Track : Song Name
-    Artist : Artist Name
-    Album : Album Name
-    Playtime : 5:23 min
-    """
-
     text = soup.get_text(" ", strip=True)
 
     pattern = re.compile(
@@ -67,20 +170,10 @@ def get_labeled_value(soup, label):
 
     match = pattern.search(text)
 
-    if match:
-        return clean(match.group(1))
+    return clean(match.group(1)) if match else ""
 
-    return ""
-
-
-# ==========================================
-# SONG EXTRACTION
-# ==========================================
 
 def extract_song(song_id, html, final_url):
-
-    soup = BeautifulSoup(html, "html.parser")
-
     path = urllib.parse.urlparse(final_url).path
 
     match = re.search(
@@ -89,11 +182,10 @@ def extract_song(song_id, html, final_url):
         re.I
     )
 
-    if not match:
+    if not match or int(match.group(1)) != song_id:
         return None, "Invalid song URL"
 
-    if int(match.group(1)) != song_id:
-        return None, "Song ID mismatch"
+    soup = BeautifulSoup(html, "html.parser")
 
     title = get_labeled_value(soup, "Track")
     artist = get_labeled_value(soup, "Artist")
@@ -102,23 +194,20 @@ def extract_song(song_id, html, final_url):
     if not title:
         return None, "Track title missing"
 
-    song = {
+    return {
         "song_id": str(song_id),
         "title": title,
         "artist": artist,
         "album": album,
         "url": final_url
-    }
-
-    return song, "OK"
+    }, "OK"
 
 
 # ==========================================
-# ROBOTS.TXT CHECK
+# ROBOTS.TXT
 # ==========================================
 
 def check_robots():
-
     request = urllib.request.Request(
         BASE + "/robots.txt",
         headers={"User-Agent": USER_AGENT}
@@ -126,10 +215,8 @@ def check_robots():
 
     try:
         with urllib.request.urlopen(
-            request,
-            timeout=15
+            request, timeout=15
         ) as response:
-
             content = response.read().decode(
                 "utf-8", "replace"
             )
@@ -138,76 +225,11 @@ def check_robots():
         robots.parse(content.splitlines())
 
         log("robots.txt checked successfully")
-
         return robots
 
     except Exception as e:
-
         log(f"robots.txt ERROR: {e}")
         return None
-
-
-# ==========================================
-# CSV DATABASE
-# ==========================================
-
-def load_existing():
-
-    songs = {}
-
-    if not os.path.exists(CSV_FILE):
-        log("No existing CSV. Creating new database.")
-        return songs
-
-    with open(
-        CSV_FILE,
-        newline="",
-        encoding="utf-8"
-    ) as file:
-
-        reader = csv.DictReader(file)
-
-        for row in reader:
-
-            sid = row.get("song_id", "")
-
-            if sid.isdigit():
-                songs[sid] = {
-                    field: row.get(field, "")
-                    for field in FIELDS
-                }
-
-    log(f"Loaded {len(songs)} existing songs")
-
-    return songs
-
-
-def save_csv(songs):
-
-    temp_file = CSV_FILE + ".tmp"
-
-    with open(
-        temp_file,
-        "w",
-        newline="",
-        encoding="utf-8"
-    ) as file:
-
-        writer = csv.DictWriter(
-            file,
-            fieldnames=FIELDS
-        )
-
-        writer.writeheader()
-
-        for sid in sorted(songs, key=int):
-            writer.writerow(songs[sid])
-
-    os.replace(temp_file, CSV_FILE)
-
-    log(
-        f"CSV saved successfully: {len(songs)} songs"
-    )
 
 
 # ==========================================
@@ -215,10 +237,14 @@ def save_csv(songs):
 # ==========================================
 
 def main():
+    songs = load_existing()
+    start_id = load_state()
+    end_id = start_id + BATCH_SIZE - 1
 
     log("================================")
-    log("DJ PUNJAB CSV SONG SCANNER")
-    log(f"Scanning IDs {START_ID} to {END_ID}")
+    log("DJ PUNJAB RESUMABLE CSV SCANNER")
+    log(f"Scanning IDs {start_id} to {end_id}")
+    log(f"Batch size: {BATCH_SIZE}")
     log("================================")
 
     robots = check_robots()
@@ -228,119 +254,114 @@ def main():
             "Cannot verify crawling rules"
         )
 
-    songs = load_existing()
-
     found = 0
     not_found = 0
     errors = 0
     skipped = 0
 
-    try:
-        for sid in range(START_ID, END_ID + 1):
+    next_id = start_id
 
+    try:
+        for sid in range(start_id, end_id + 1):
             url = f"{BASE}/song/{sid}"
 
             if not robots.can_fetch(USER_AGENT, url):
                 skipped += 1
                 log(
-                    f"[{sid:03d}] SKIPPED | robots.txt"
+                    f"[{sid:06d}] SKIPPED | robots.txt"
                 )
-                continue
+                # Do not advance past a disallowed ID.
+                break
 
             try:
-
                 request = urllib.request.Request(
                     url,
-                    headers={
-                        "User-Agent": USER_AGENT
-                    }
+                    headers={"User-Agent": USER_AGENT}
                 )
 
                 with urllib.request.urlopen(
-                    request,
-                    timeout=15
+                    request, timeout=15
                 ) as response:
-
                     html = response.read().decode(
                         "utf-8", "replace"
                     )
-
                     final_url = response.geturl()
                     status = response.status
 
                 song, reason = extract_song(
-                    sid,
-                    html,
-                    final_url
+                    sid, html, final_url
                 )
 
                 if song:
+                    old = songs.get(str(sid), {})
+
+                    # Do not erase existing nonempty fields.
+                    for field in ("artist", "album"):
+                        if not song[field]:
+                            song[field] = old.get(field, "")
 
                     songs[str(sid)] = song
                     found += 1
 
                     log(
-                        f"[{sid:03d}] FOUND | "
+                        f"[{sid:06d}] FOUND | "
                         f"HTTP {status} | "
                         f"Title: {song['title']} | "
                         f"Artist: {song['artist'] or 'Unknown'} | "
                         f"Album: {song['album'] or 'Unknown'}"
                     )
-
                 else:
-
-                    not_found += 1
-
+                    # Unrecognized pages should be reviewed.
+                    # Do not silently skip them.
+                    errors += 1
                     log(
-                        f"[{sid:03d}] NOT FOUND | "
-                        f"{reason}"
+                        f"[{sid:06d}] UNPARSED | {reason}"
                     )
+                    break
 
             except urllib.error.HTTPError as e:
-
                 if e.code == 404:
-
                     not_found += 1
-
                     log(
-                        f"[{sid:03d}] NOT FOUND | HTTP 404"
+                        f"[{sid:06d}] NOT FOUND | HTTP 404"
                     )
-
                 else:
-
                     errors += 1
-
                     log(
-                        f"[{sid:03d}] ERROR | HTTP {e.code}"
+                        f"[{sid:06d}] ERROR | HTTP {e.code}"
                     )
 
                     if e.code in (403, 429):
                         log("Access restricted. Stopping.")
-                        break
+
+                    break
 
             except Exception as e:
-
                 errors += 1
-
-                log(
-                    f"[{sid:03d}] ERROR | {e}"
-                )
-
+                log(f"[{sid:06d}] ERROR | {e}")
                 break
 
-            time.sleep(DELAY_SECONDS)
+            # Advance only after a completed ID.
+            next_id = sid + 1
+
+            # Save locally after every ID.
+            checkpoint(songs, next_id)
+
+            if sid < end_id:
+                time.sleep(DELAY_SECONDS)
 
     finally:
-        save_csv(songs)
+        checkpoint(songs, next_id)
 
-    log("")
-    log("========== SCAN SUMMARY ==========")
-    log(f"Found:       {found}")
-    log(f"Not found:   {not_found}")
-    log(f"Errors:      {errors}")
-    log(f"Skipped:     {skipped}")
-    log(f"CSV records: {len(songs)}")
-    log("==================================")
+        log("")
+        log("========== SCAN SUMMARY ==========")
+        log(f"Found:       {found}")
+        log(f"Not found:   {not_found}")
+        log(f"Errors:      {errors}")
+        log(f"Skipped:     {skipped}")
+        log(f"CSV records: {len(songs)}")
+        log(f"Next ID:     {next_id}")
+        log("==================================")
 
 
 if __name__ == "__main__":
