@@ -110,4 +110,4 @@ workflows:
       - scan-songs:
           filters:
             branches:
-              only: circleci-project-setup
+              only: main
