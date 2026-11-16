@@ -1,5 +1,5 @@
 
-name: Scan DjPunjab SQLite
+name: Scan DjPunjab CSV
 
 on:
   workflow_dispatch:
@@ -8,7 +8,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: djpunjab-sqlite-scanner
+  group: djpunjab-csv-scanner
   cancel-in-progress: false
 
 jobs:
@@ -30,19 +30,21 @@ jobs:
       - name: Scan Songs
         run: python -u scan_songs.py
 
-      - name: Save SQLite Database
+      - name: Save CSV to GitHub
         if: always()
         run: |
-          if [ -f songs.db ]; then
+          if [ -f songs.csv ]; then
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-            git add songs.db
+            git add songs.csv
 
             if ! git diff --cached --quiet; then
-              git commit -m "Update SQLite song database"
+              git commit -m "Update song database"
               git push
+            else
+              echo "No CSV changes to save."
             fi
           else
-            echo "No database generated."
+            echo "No CSV generated."
           fi
