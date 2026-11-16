@@ -18,7 +18,7 @@ from bs4 import BeautifulSoup
 BASE = "https://djpunjab.is"
 
 BATCH_SIZE = 1000
-DELAY_SECONDS = 3
+DELAY_SECONDS = 0.001
 
 CSV_FILE = "songs.csv"
 STATE_FILE = "scan_state.json"
