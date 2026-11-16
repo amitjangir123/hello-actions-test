@@ -12,14 +12,59 @@ jobs:
       - checkout
 
       - run:
-          name: Install Python dependencies
+          name: Configure Git
+          command: |
+            set -eu
+            test -n "${GH_PUSH_TOKEN:-}"
+
+            git config user.name "circleci-bot"
+            git config user.email "circleci-bot@users.noreply.github.com"
+
+            git config credential.helper \
+              '!f() { echo username=x-access-token; echo "password=$GH_PUSH_TOKEN"; }; f'
+
+            git remote set-url origin \
+              https://github.com/amitjangir123/hello-actions-test.git
+
+      - run:
+          name: Load latest main branch
+          command: |
+            git fetch origin main
+            git checkout -B music-scanner-work origin/main
+
+      - run:
+          name: Install dependencies
           command: pip install beautifulsoup4
 
       - run:
-          name: Run song scanner
+          name: Run scanner
           command: python -u scan_songs.py
+
+      - run:
+          name: Commit and push results
+          when: always
+          command: |
+            set -eu
+
+            if [ -f songs.csv ]; then
+              git add songs.csv
+            fi
+
+            if [ -f scan_state.json ]; then
+              git add scan_state.json
+            fi
+
+            if ! git diff --cached --quiet; then
+              git commit -m "[skip ci] Update song database"
+              git push origin HEAD:main
+            else
+              echo "No changes to commit"
+            fi
 
 workflows:
   scan-workflow:
     jobs:
-      - scan-songs
+      - scan-songs:
+          filters:
+            branches:
+              only: circleci-project-setup
