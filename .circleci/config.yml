@@ -24,25 +24,29 @@ jobs:
             git config user.name "circleci-bot"
             git config user.email "circleci-bot@users.noreply.github.com"
 
-            # Force HTTPS rather than SSH
-            git config --global \
-              url."https://github.com/".insteadOf \
-              "git@github.com:"
+            # Remove SSH rewrite rules from all
+            # writable Git configuration scopes.
+            git config --global --remove-section \
+              'url.git@github.com:' 2>/dev/null || true
+
+            git config --local --remove-section \
+              'url.git@github.com:' 2>/dev/null || true
 
             git remote set-url origin \
               https://github.com/amitjangir123/hello-actions-test.git
-
-            # Authenticate using CircleCI secret
-            git config --local credential.helper \
-              '!f() { echo username=x-access-token; echo "password=$GH_PUSH_TOKEN"; }; f'
 
             echo "Git authentication configured"
 
       - run:
           name: Load Latest Main Branch
           command: |
-            git fetch origin main
-            git checkout -B music-scanner-work origin/main
+            set -eu
+
+            git -c url.git@github.com:.insteadOf= \
+              fetch https://github.com/amitjangir123/hello-actions-test.git \
+              main
+
+            git checkout -B music-scanner-work FETCH_HEAD
 
       - run:
           name: Install Python Dependencies
@@ -60,18 +64,13 @@ jobs:
           command: |
             set -eu
 
+            if [ -z "${GH_PUSH_TOKEN:-}" ]; then
+              echo "ERROR: GH_PUSH_TOKEN is missing"
+              exit 1
+            fi
+
             git config user.name "circleci-bot"
             git config user.email "circleci-bot@users.noreply.github.com"
-
-            git config --global \
-              url."https://github.com/".insteadOf \
-              "git@github.com:"
-
-            git remote set-url origin \
-              https://github.com/amitjangir123/hello-actions-test.git
-
-            git config --local credential.helper \
-              '!f() { echo username=x-access-token; echo "password=$GH_PUSH_TOKEN"; }; f'
 
             if [ -f songs.csv ]; then
               git add songs.csv
@@ -81,17 +80,29 @@ jobs:
               git add scan_state.json
             fi
 
-            if ! git diff --cached --quiet; then
-              git commit -m "[skip ci] Update songs database and scan state"
-
-              git push \
-                https://github.com/amitjangir123/hello-actions-test.git \
-                HEAD:main
-
-              echo "Successfully pushed database to main"
-            else
+            if git diff --cached --quiet; then
               echo "No changes to commit"
+              exit 0
             fi
+
+            git commit -m "[skip ci] Update songs database and scan state"
+
+            # Create HTTPS Basic authentication header
+            # without printing the secret.
+            AUTH_HEADER=$(printf 'x-access-token:%s' "$GH_PUSH_TOKEN" | base64 | tr -d '\n')
+
+            # Push with explicit HTTPS authentication.
+            # Isolate Git configuration to prevent
+            # inherited SSH URL rewrites.
+            GIT_CONFIG_NOSYSTEM=1 \
+            GIT_CONFIG_GLOBAL=/dev/null \
+            git -c "http.https://github.com/.extraheader=AUTHORIZATION: basic $AUTH_HEADER" \
+              push https://github.com/amitjangir123/hello-actions-test.git \
+              HEAD:main
+
+            unset AUTH_HEADER
+
+            echo "Successfully pushed database to main"
 
 workflows:
   scan-workflow:
