@@ -18,7 +18,8 @@ from bs4 import BeautifulSoup
 BASE = "https://djpunjab.is"
 
 BATCH_SIZE = 1000
-DELAY_SECONDS = 0.001
+DELAY_SECONDS = 3
+CHECKPOINT_EVERY = 25
 
 CSV_FILE = "songs.csv"
 STATE_FILE = "scan_state.json"
@@ -143,9 +144,9 @@ def save_csv(songs):
 
 
 def checkpoint(songs, next_id):
-    # Write CSV first, then state.
-    # If interrupted between writes, some IDs
-    # may be rescanned, but valid records remain.
+    # CSV is written first, then scan state.
+    # Repeated scans are safe because song_id
+    # is used as the unique dictionary key.
     save_csv(songs)
     save_state(next_id)
 
@@ -258,6 +259,7 @@ def main():
     not_found = 0
     errors = 0
     skipped = 0
+    completed = 0
 
     next_id = start_id
 
@@ -270,7 +272,6 @@ def main():
                 log(
                     f"[{sid:06d}] SKIPPED | robots.txt"
                 )
-                # Do not advance past a disallowed ID.
                 break
 
             try:
@@ -295,7 +296,6 @@ def main():
                 if song:
                     old = songs.get(str(sid), {})
 
-                    # Do not erase existing nonempty fields.
                     for field in ("artist", "album"):
                         if not song[field]:
                             song[field] = old.get(field, "")
@@ -310,9 +310,15 @@ def main():
                         f"Artist: {song['artist'] or 'Unknown'} | "
                         f"Album: {song['album'] or 'Unknown'}"
                     )
+
+                elif reason == "Invalid song URL":
+                    not_found += 1
+                    log(
+                        f"[{sid:06d}] NOT FOUND | "
+                        f"{reason}"
+                    )
+
                 else:
-                    # Unrecognized pages should be reviewed.
-                    # Do not silently skip them.
                     errors += 1
                     log(
                         f"[{sid:06d}] UNPARSED | {reason}"
@@ -333,7 +339,6 @@ def main():
 
                     if e.code in (403, 429):
                         log("Access restricted. Stopping.")
-
                     break
 
             except Exception as e:
@@ -341,11 +346,13 @@ def main():
                 log(f"[{sid:06d}] ERROR | {e}")
                 break
 
-            # Advance only after a completed ID.
+            # This ID was processed successfully,
+            # even if no song existed.
             next_id = sid + 1
+            completed += 1
 
-            # Save locally after every ID.
-            checkpoint(songs, next_id)
+            if completed % CHECKPOINT_EVERY == 0:
+                checkpoint(songs, next_id)
 
             if sid < end_id:
                 time.sleep(DELAY_SECONDS)
@@ -359,6 +366,7 @@ def main():
         log(f"Not found:   {not_found}")
         log(f"Errors:      {errors}")
         log(f"Skipped:     {skipped}")
+        log(f"Processed:   {completed}")
         log(f"CSV records: {len(songs)}")
         log(f"Next ID:     {next_id}")
         log("==================================")
