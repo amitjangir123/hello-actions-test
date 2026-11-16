@@ -23,8 +23,8 @@ jobs:
       - name: Install Dependencies
         run: pip install beautifulsoup4
 
-      - name: Scan Songs
-        run: python -u scan_songs.py
+      - name: Inspect Song Metadata
+        run: python -u inspect_song.py
 
       - name: Save CSV to GitHub
         if: always()
