@@ -12,39 +12,66 @@ jobs:
       - checkout
 
       - run:
-          name: Configure Git
+          name: Configure Git Authentication
           command: |
             set -eu
-            test -n "${GH_PUSH_TOKEN:-}"
+
+            if [ -z "${GH_PUSH_TOKEN:-}" ]; then
+              echo "ERROR: GH_PUSH_TOKEN is missing"
+              exit 1
+            fi
 
             git config user.name "circleci-bot"
             git config user.email "circleci-bot@users.noreply.github.com"
 
-            git config credential.helper \
-              '!f() { echo username=x-access-token; echo "password=$GH_PUSH_TOKEN"; }; f'
+            # Force HTTPS rather than SSH
+            git config --global \
+              url."https://github.com/".insteadOf \
+              "git@github.com:"
 
             git remote set-url origin \
               https://github.com/amitjangir123/hello-actions-test.git
 
+            # Authenticate using CircleCI secret
+            git config --local credential.helper \
+              '!f() { echo username=x-access-token; echo "password=$GH_PUSH_TOKEN"; }; f'
+
+            echo "Git authentication configured"
+
       - run:
-          name: Load latest main branch
+          name: Load Latest Main Branch
           command: |
             git fetch origin main
             git checkout -B music-scanner-work origin/main
 
       - run:
-          name: Install dependencies
-          command: pip install beautifulsoup4
+          name: Install Python Dependencies
+          command: |
+            python -m pip install beautifulsoup4
 
       - run:
-          name: Run scanner
-          command: python -u scan_songs.py
+          name: Run Song Scanner
+          command: |
+            python -u scan_songs.py
 
       - run:
-          name: Commit and push results
+          name: Commit and Push to Main
           when: always
           command: |
             set -eu
+
+            git config user.name "circleci-bot"
+            git config user.email "circleci-bot@users.noreply.github.com"
+
+            git config --global \
+              url."https://github.com/".insteadOf \
+              "git@github.com:"
+
+            git remote set-url origin \
+              https://github.com/amitjangir123/hello-actions-test.git
+
+            git config --local credential.helper \
+              '!f() { echo username=x-access-token; echo "password=$GH_PUSH_TOKEN"; }; f'
 
             if [ -f songs.csv ]; then
               git add songs.csv
@@ -55,8 +82,13 @@ jobs:
             fi
 
             if ! git diff --cached --quiet; then
-              git commit -m "[skip ci] Update song database"
-              git push origin HEAD:main
+              git commit -m "[skip ci] Update songs database and scan state"
+
+              git push \
+                https://github.com/amitjangir123/hello-actions-test.git \
+                HEAD:main
+
+              echo "Successfully pushed database to main"
             else
               echo "No changes to commit"
             fi
