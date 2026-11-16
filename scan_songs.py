@@ -16,8 +16,8 @@ from bs4 import BeautifulSoup
 
 BASE = "https://djpunjab.is"
 
-START_ID = 0
-END_ID = 9
+START_ID = 300000
+END_ID = 312000
 
 DELAY_SECONDS = 0.1
 CSV_FILE = "songs.csv"
