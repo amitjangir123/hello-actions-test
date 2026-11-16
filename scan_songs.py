@@ -19,7 +19,7 @@ BASE = "https://djpunjab.is"
 START_ID = 0
 END_ID = 9
 
-DELAY_SECONDS = 3
+DELAY_SECONDS = 0.1
 CSV_FILE = "songs.csv"
 
 USER_AGENT = "PersonalMusicCatalogResearch/1.0"
