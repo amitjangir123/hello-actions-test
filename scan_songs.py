@@ -1,6 +1,5 @@
 
 import csv
-import json
 import re
 import time
 import urllib.error
@@ -10,111 +9,79 @@ import urllib.robotparser
 
 from bs4 import BeautifulSoup
 
+# ==========================================
+# CONFIGURATION
+# ==========================================
+
 BASE = "https://djpunjab.is"
 
 START_ID = 0
 END_ID = 9
+
 DELAY_SECONDS = 3
 
 CSV_FILE = "songs.csv"
+
 USER_AGENT = "PersonalMusicCatalogResearch/1.0"
 
-FIELDS = ["song_id", "title", "artist", "album", "url"]
+FIELDS = [
+    "song_id",
+    "title",
+    "artist",
+    "album",
+    "url"
+]
 
+
+# ==========================================
+# HELPER FUNCTIONS
+# ==========================================
 
 def log(message):
     print(message, flush=True)
 
 
 def clean(value):
-    return re.sub(r"\s+", " ", str(value or "")).strip()
+    return re.sub(
+        r"\s+", " ", str(value or "")
+    ).strip()
 
 
-def get_meta(soup, name):
-    tag = (
-        soup.find("meta", attrs={"property": name})
-        or soup.find("meta", attrs={"name": name})
-    )
+def get_labeled_value(soup, label):
+    """
+    Extract fields such as:
 
-    if tag:
-        return clean(tag.get("content"))
+    Track : Taithon Door Sohniya Ve
+    Artist : Kuldeep Rasila
+    Album : Taithon Door Sohniya Ve
+    Playtime : 5:23 min
+    """
 
-    return ""
+    text = soup.get_text(" ", strip=True)
 
-
-def person_name(value):
-    if isinstance(value, str):
-        return clean(value)
-
-    if isinstance(value, dict):
-        return clean(value.get("name"))
-
-    if isinstance(value, list):
-        return ", ".join(
-            filter(None, [person_name(v) for v in value])
-        )
-
-    return ""
-
-
-def get_jsonld(soup):
-    for script in soup.find_all(
-        "script", attrs={"type": "application/ld+json"}
-    ):
-        try:
-            data = json.loads(script.string or script.get_text())
-
-            def find_record(obj):
-                if isinstance(obj, list):
-                    for item in obj:
-                        result = find_record(item)
-                        if result:
-                            return result
-
-                if isinstance(obj, dict):
-                    types = obj.get("@type", [])
-                    if isinstance(types, str):
-                        types = [types]
-
-                    if "MusicRecording" in types:
-                        return obj
-
-                    for value in obj.values():
-                        result = find_record(value)
-                        if result:
-                            return result
-
-                return None
-
-            result = find_record(data)
-
-            if result:
-                return result
-
-        except (ValueError, TypeError):
-            pass
-
-    return {}
-
-
-def labeled_value(soup, label):
     pattern = re.compile(
-        rf"^{re.escape(label)}\s*:\s*(.+)$",
+        rf"\b{re.escape(label)}\s*:\s*(.*?)"
+        rf"(?=\s+(?:Track|Artist|Album|Playtime)\s*:|$)",
         re.I
     )
 
-    for text in soup.stripped_strings:
-        match = pattern.match(clean(text))
+    match = pattern.search(text)
 
-        if match:
-            return clean(match.group(1))
+    if match:
+        return clean(match.group(1))
 
     return ""
 
 
 def extract_song(song_id, html, final_url):
+    """
+    Extract metadata from a valid song page.
+    """
+
     soup = BeautifulSoup(html, "html.parser")
 
+    # Verify that the final URL contains
+    # the requested song ID.
     path = urllib.parse.urlparse(final_url).path
 
     match = re.search(
@@ -123,72 +90,40 @@ def extract_song(song_id, html, final_url):
         re.I
     )
 
-    if not match or int(match.group(1)) != song_id:
+    if not match:
         return None, "Invalid song URL"
 
-    structured = get_jsonld(soup)
+    if int(match.group(1)) != song_id:
+        return None, "Song ID mismatch"
 
-    title = clean(structured.get("name"))
-
-    artist = person_name(
-        structured.get("byArtist")
-        or structured.get("artist")
-    )
-
-    album = person_name(structured.get("inAlbum"))
-
-    if not artist:
-        artist = get_meta(soup, "music:musician")
-
-    if not artist:
-        artist = labeled_value(soup, "Singer")
-
-    if not artist:
-        artist = labeled_value(soup, "Artist")
-
-    if not album:
-        album = get_meta(soup, "music:album")
-
-    if not album:
-        album = labeled_value(soup, "Album")
+    # Extract actual page fields
+    title = get_labeled_value(soup, "Track")
+    artist = get_labeled_value(soup, "Artist")
+    album = get_labeled_value(soup, "Album")
 
     if not title:
-        title = labeled_value(soup, "Song")
+        return None, "Track title missing"
 
-    if not title:
-        title = get_meta(soup, "og:title")
-
-        title = re.sub(
-            r"\s*(?:mp3 song download|download mp3).*",
-            "",
-            title,
-            flags=re.I
-        ).strip()
-
-        if artist and title.lower().endswith(artist.lower()):
-            title = title[:-len(artist)].strip(" -|")
-
-        elif title:
-            log(
-                f"[{song_id:03d}] WARNING | "
-                "Title may contain artist name"
-            )
-
-    if not title:
-        return None, "No song title extracted"
-
-    return {
+    song = {
         "song_id": str(song_id),
         "title": title,
         "artist": artist,
         "album": album,
         "url": final_url
-    }, "OK"
+    }
+
+    return song, "OK"
 
 
 def check_robots():
+    """
+    Verify website crawling rules.
+    """
+
+    url = BASE + "/robots.txt"
+
     request = urllib.request.Request(
-        BASE + "/robots.txt",
+        url,
         headers={"User-Agent": USER_AGENT}
     )
 
@@ -204,6 +139,7 @@ def check_robots():
         robots.parse(content.splitlines())
 
         log("robots.txt checked successfully")
+
         return robots
 
     except Exception as e:
@@ -212,13 +148,22 @@ def check_robots():
 
 
 def load_existing():
+    """
+    Load previously discovered songs.
+    """
+
     songs = {}
 
     try:
         with open(
-            CSV_FILE, newline="", encoding="utf-8"
-        ) as f:
-            for row in csv.DictReader(f):
+            CSV_FILE,
+            newline="",
+            encoding="utf-8"
+        ) as file:
+
+            reader = csv.DictReader(file)
+
+            for row in reader:
                 sid = row.get("song_id", "")
 
                 if sid.isdigit():
@@ -227,24 +172,47 @@ def load_existing():
                         for field in FIELDS
                     }
 
+        log(f"Loaded {len(songs)} existing songs")
+
     except FileNotFoundError:
-        pass
+        log("No existing CSV. Creating new database.")
 
     return songs
 
 
 def save_csv(songs):
+    """
+    Save all songs sorted by song ID.
+    """
+
     with open(
-        CSV_FILE, "w", newline="", encoding="utf-8"
-    ) as f:
-        writer = csv.DictWriter(f, fieldnames=FIELDS)
+        CSV_FILE,
+        "w",
+        newline="",
+        encoding="utf-8"
+    ) as file:
+
+        writer = csv.DictWriter(
+            file,
+            fieldnames=FIELDS
+        )
+
         writer.writeheader()
 
         for sid in sorted(songs, key=int):
             writer.writerow(songs[sid])
 
+    log(
+        f"CSV saved successfully: {len(songs)} songs"
+    )
+
+
+# ==========================================
+# MAIN SCANNER
+# ==========================================
 
 def main():
+
     log("================================")
     log("DJ PUNJAB SONG SCANNER")
     log(f"Scanning IDs {START_ID} to {END_ID}")
@@ -253,7 +221,7 @@ def main():
     robots = check_robots()
 
     if robots is None:
-        log("Cannot verify access rules. Stopping.")
+        log("Cannot verify crawling rules. Stopping.")
         return
 
     songs = load_existing()
@@ -261,34 +229,48 @@ def main():
     found = 0
     not_found = 0
     errors = 0
+    skipped = 0
 
     for sid in range(START_ID, END_ID + 1):
+
         url = f"{BASE}/song/{sid}"
 
         if not robots.can_fetch(USER_AGENT, url):
-            log(f"[{sid:03d}] SKIPPED | robots.txt")
+            skipped += 1
+            log(
+                f"[{sid:03d}] SKIPPED | robots.txt"
+            )
             continue
 
         try:
+
             request = urllib.request.Request(
                 url,
-                headers={"User-Agent": USER_AGENT}
+                headers={
+                    "User-Agent": USER_AGENT
+                }
             )
 
             with urllib.request.urlopen(
-                request, timeout=15
+                request,
+                timeout=15
             ) as response:
+
                 html = response.read().decode(
                     "utf-8", "replace"
                 )
+
                 final_url = response.geturl()
                 status = response.status
 
             song, reason = extract_song(
-                sid, html, final_url
+                sid,
+                html,
+                final_url
             )
 
             if song:
+
                 songs[str(sid)] = song
                 found += 1
 
@@ -301,40 +283,58 @@ def main():
                 )
 
             else:
+
                 not_found += 1
+
                 log(
                     f"[{sid:03d}] NOT FOUND | "
                     f"{reason}"
                 )
 
         except urllib.error.HTTPError as e:
+
             if e.code == 404:
+
                 not_found += 1
-                log(f"[{sid:03d}] NOT FOUND | HTTP 404")
+
+                log(
+                    f"[{sid:03d}] NOT FOUND | HTTP 404"
+                )
 
             else:
+
                 errors += 1
-                log(f"[{sid:03d}] ERROR | HTTP {e.code}")
+
+                log(
+                    f"[{sid:03d}] ERROR | HTTP {e.code}"
+                )
 
                 if e.code in (403, 429):
                     log("Access restricted. Stopping.")
                     break
 
         except Exception as e:
+
             errors += 1
-            log(f"[{sid:03d}] ERROR | {e}")
+
+            log(
+                f"[{sid:03d}] ERROR | {e}"
+            )
+
             break
 
         time.sleep(DELAY_SECONDS)
 
     save_csv(songs)
 
-    log("========== SUMMARY ==========")
-    log(f"Found: {found}")
-    log(f"Not found: {not_found}")
-    log(f"Errors: {errors}")
-    log(f"Total CSV records: {len(songs)}")
-    log("=============================")
+    log("")
+    log("========== SCAN SUMMARY ==========")
+    log(f"Found:       {found}")
+    log(f"Not found:   {not_found}")
+    log(f"Errors:      {errors}")
+    log(f"Skipped:     {skipped}")
+    log(f"CSV records: {len(songs)}")
+    log("==================================")
 
 
 if __name__ == "__main__":
