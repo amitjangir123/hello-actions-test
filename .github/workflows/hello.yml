@@ -3,6 +3,8 @@ name: Scan DjPunjab CSV
 
 on:
   workflow_dispatch:
+  schedule:
+    - cron: "*/6 * * * *"    
 
 permissions:
   contents: write
