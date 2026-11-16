@@ -12,14 +12,22 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repository
+      - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Run song scanner
-        run: python scan_songs.py
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
 
+      - name: Install Dependencies
+        run: pip install beautifulsoup4
 
-      - name: Save CSV
+      - name: Scan Songs
+        run: python -u scan_songs.py
+
+      - name: Save CSV to GitHub
+        if: always()
         run: |
           if [ -f songs.csv ]; then
             git config user.name "github-actions[bot]"
@@ -34,6 +42,3 @@ jobs:
           else
             echo "No CSV generated."
           fi
-
-
-    
