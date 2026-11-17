@@ -19,7 +19,7 @@ from bs4 import BeautifulSoup
 BASE = "https://djpunjab.is"
 
 BATCH_SIZE = 10000
-DELAY_SECONDS = 2
+DELAY_SECONDS = 0.001
 CHECKPOINT_EVERY = 25
 PUSH_EVERY = 1000
 
