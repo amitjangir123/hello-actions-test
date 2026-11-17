@@ -4,11 +4,10 @@ import json
 import os
 import re
 import time
-import urllib.error
-import urllib.parse
-import urllib.request
 import urllib.robotparser
+from urllib.parse import urlparse
 
+import requests
 from bs4 import BeautifulSoup
 
 # ==========================================
@@ -18,7 +17,7 @@ from bs4 import BeautifulSoup
 BASE = "https://djpunjab.is"
 
 BATCH_SIZE = 100
-DELAY_SECONDS = 0.001
+DELAY_SECONDS = 2
 CHECKPOINT_EVERY = 25
 
 CSV_FILE = "songs.csv"
@@ -27,6 +26,9 @@ HTTP400_FILE = "http400_ids.csv"
 
 USER_AGENT = "PersonalMusicCatalogResearch/1.0"
 
+REQUEST_TIMEOUT = (5, 15)
+MAX_HTML_BYTES = 2 * 1024 * 1024
+
 FIELDS = [
     "song_id",
     "title",
@@ -34,7 +36,6 @@ FIELDS = [
     "album",
     "url"
 ]
-
 
 # ==========================================
 # HELPERS
@@ -62,12 +63,38 @@ def atomic_write_json(path, data):
 
 
 # ==========================================
+# HTTP SESSION
+# ==========================================
+
+def create_session():
+    session = requests.Session()
+
+    session.headers.update({
+        "User-Agent": USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml"
+    })
+
+    # requests.Session reuses available
+    # HTTP connections across requests.
+
+    adapter = requests.adapters.HTTPAdapter(
+        pool_connections=2,
+        pool_maxsize=2,
+        max_retries=0
+    )
+
+    session.mount("https://", adapter)
+
+    return session
+
+
+# ==========================================
 # STATE MANAGEMENT
 # ==========================================
 
 def load_state():
     if not os.path.exists(STATE_FILE):
-        log("No scan state found. Starting at ID 0.")
+        log("No scan state. Starting at ID 0.")
         return 0
 
     with open(STATE_FILE, encoding="utf-8") as f:
@@ -76,11 +103,10 @@ def load_state():
     next_id = state.get("next_id")
 
     if type(next_id) is not int or next_id < 0:
-        raise ValueError(
-            "Invalid next_id in scan_state.json"
-        )
+        raise ValueError("Invalid next_id")
 
     log(f"Resuming from ID {next_id}")
+
     return next_id
 
 
@@ -99,7 +125,7 @@ def load_existing():
     songs = {}
 
     if not os.path.exists(CSV_FILE):
-        log("No existing CSV. Creating new database.")
+        log("Creating new CSV database.")
         return songs
 
     with open(
@@ -121,7 +147,8 @@ def load_existing():
                     for field in FIELDS
                 }
 
-    log(f"Loaded {len(songs)} existing songs")
+    log(f"Loaded {len(songs)} songs")
+
     return songs
 
 
@@ -157,14 +184,11 @@ def load_http400_ids():
         return ids
 
     with open(
-        HTTP400_FILE,
-        newline="",
-        encoding="utf-8"
+        HTTP400_FILE, newline="", encoding="utf-8"
     ) as f:
-        reader = csv.DictReader(f)
-
-        for row in reader:
+        for row in csv.DictReader(f):
             sid = row.get("song_id", "")
+
             if sid.isdigit():
                 ids.add(int(sid))
 
@@ -175,10 +199,7 @@ def save_http400_ids(ids):
     temp = HTTP400_FILE + ".tmp"
 
     with open(
-        temp,
-        "w",
-        newline="",
-        encoding="utf-8"
+        temp, "w", newline="", encoding="utf-8"
     ) as f:
         writer = csv.writer(f)
         writer.writerow(["song_id"])
@@ -193,7 +214,10 @@ def save_http400_ids(ids):
 
 
 def checkpoint(songs, next_id, http400_ids):
-    # Write data before advancing scan state.
+    # Save data before advancing the state.
+    # A crash between writes can cause rescanning,
+    # but will not intentionally skip records.
+
     save_csv(songs)
     save_http400_ids(http400_ids)
     save_state(next_id)
@@ -201,7 +225,7 @@ def checkpoint(songs, next_id, http400_ids):
     log(
         f"CHECKPOINT | Next ID: {next_id} | "
         f"Songs: {len(songs)} | "
-        f"HTTP 400 IDs: {len(http400_ids)}"
+        f"HTTP 400: {len(http400_ids)}"
     )
 
 
@@ -209,37 +233,42 @@ def checkpoint(songs, next_id, http400_ids):
 # HTML PARSING
 # ==========================================
 
-def get_labeled_value(soup, label):
-    text = soup.get_text(" ", strip=True)
+FIELD_PATTERN = re.compile(
+    r"\b(Track|Artist|Album|Playtime)\s*:\s*(.*?)"
+    r"(?=\s+(?:Track|Artist|Album|Playtime)\s*:|$)",
+    re.I
+)
 
-    pattern = re.compile(
-        rf"\b{re.escape(label)}\s*:\s*(.*?)"
-        rf"(?=\s+(?:Track|Artist|Album|Playtime)\s*:|$)",
-        re.I
-    )
-
-    match = pattern.search(text)
-
-    return clean(match.group(1)) if match else ""
+SONG_URL_PATTERN = re.compile(
+    r"(?:/song/|mp3-song-)(\d+)(?:\.html)?/?$",
+    re.I
+)
 
 
 def extract_song(song_id, html, final_url):
-    path = urllib.parse.urlparse(final_url).path
+    path = urlparse(final_url).path
 
-    match = re.search(
-        r"(?:/song/|mp3-song-)(\d+)(?:\.html)?/?$",
-        path,
-        re.I
-    )
+    match = SONG_URL_PATTERN.search(path)
 
     if not match or int(match.group(1)) != song_id:
         return None, "Invalid song URL"
 
     soup = BeautifulSoup(html, "html.parser")
 
-    title = get_labeled_value(soup, "Track")
-    artist = get_labeled_value(soup, "Artist")
-    album = get_labeled_value(soup, "Album")
+    # Extract page text only once.
+    text = soup.get_text(" ", strip=True)
+
+    values = {}
+
+    for match in FIELD_PATTERN.finditer(text):
+        key = match.group(1).lower()
+
+        if key not in values:
+            values[key] = clean(match.group(2))
+
+    title = values.get("track", "")
+    artist = values.get("artist", "")
+    album = values.get("album", "")
 
     if not title:
         return None, "Track title missing"
@@ -257,27 +286,25 @@ def extract_song(song_id, html, final_url):
 # ROBOTS.TXT
 # ==========================================
 
-def check_robots():
-    request = urllib.request.Request(
-        BASE + "/robots.txt",
-        headers={"User-Agent": USER_AGENT}
-    )
+def check_robots(session):
+    url = BASE + "/robots.txt"
 
     try:
-        with urllib.request.urlopen(
-            request, timeout=15
-        ) as response:
-            content = response.read().decode(
-                "utf-8", "replace"
-            )
+        response = session.get(
+            url,
+            timeout=REQUEST_TIMEOUT
+        )
+
+        response.raise_for_status()
 
         robots = urllib.robotparser.RobotFileParser()
-        robots.parse(content.splitlines())
+        robots.parse(response.text.splitlines())
 
         log("robots.txt checked successfully")
+
         return robots
 
-    except Exception as e:
+    except requests.RequestException as e:
         log(f"robots.txt ERROR: {e}")
         return None
 
@@ -294,17 +321,13 @@ def main():
     end_id = start_id + BATCH_SIZE - 1
 
     log("================================")
-    log("DJ PUNJAB RESUMABLE CSV SCANNER")
+    log("DJ PUNJAB OPTIMIZED CSV SCANNER")
     log(f"Scanning IDs {start_id} to {end_id}")
     log(f"Batch size: {BATCH_SIZE}")
+    log(f"Delay: {DELAY_SECONDS}s")
     log("================================")
 
-    robots = check_robots()
-
-    if robots is None:
-        raise RuntimeError(
-            "Cannot verify crawling rules"
-        )
+    session = create_session()
 
     found = 0
     not_found = 0
@@ -313,107 +336,177 @@ def main():
     completed = 0
 
     next_id = start_id
+    interrupted = False
+
+    started_at = time.perf_counter()
 
     try:
+        robots = check_robots(session)
+
+        if robots is None:
+            raise RuntimeError(
+                "Cannot verify crawling rules"
+            )
+
         for sid in range(start_id, end_id + 1):
             url = f"{BASE}/song/{sid}"
 
             if not robots.can_fetch(USER_AGENT, url):
                 skipped += 1
+                interrupted = True
+
                 log(
                     f"[{sid:06d}] SKIPPED | robots.txt"
                 )
                 break
 
+            request_start = time.perf_counter()
+
             try:
-                request = urllib.request.Request(
+                response = session.get(
                     url,
-                    headers={"User-Agent": USER_AGENT}
+                    timeout=REQUEST_TIMEOUT,
+                    allow_redirects=True
                 )
 
-                with urllib.request.urlopen(
-                    request, timeout=15
-                ) as response:
-                    html = response.read().decode(
-                        "utf-8", "replace"
-                    )
-                    final_url = response.geturl()
-                    status = response.status
-
-                song, reason = extract_song(
-                    sid, html, final_url
+                elapsed = (
+                    time.perf_counter() - request_start
                 )
 
-                if song:
-                    old = songs.get(str(sid), {})
+                status = response.status_code
 
-                    for field in ("artist", "album"):
-                        if not song[field]:
-                            song[field] = old.get(field, "")
-
-                    songs[str(sid)] = song
-                    found += 1
-
-                    log(
-                        f"[{sid:06d}] FOUND | "
-                        f"HTTP {status} | "
-                        f"Title: {song['title']} | "
-                        f"Artist: {song['artist'] or 'Unknown'} | "
-                        f"Album: {song['album'] or 'Unknown'}"
-                    )
-
-                elif reason == "Invalid song URL":
-                    not_found += 1
-                    log(
-                        f"[{sid:06d}] NOT FOUND | "
-                        f"{reason}"
-                    )
-
-                else:
-                    errors += 1
-                    log(
-                        f"[{sid:06d}] UNPARSED | {reason}"
-                    )
-                    break
-
-            except urllib.error.HTTPError as e:
-                if e.code in (400, 404):
+                if status in (400, 404):
                     not_found += 1
 
-                    if e.code == 400:
+                    if status == 400:
                         http400_ids.add(sid)
 
                     log(
                         f"[{sid:06d}] NOT FOUND | "
-                        f"HTTP {e.code}"
+                        f"HTTP {status} | "
+                        f"{elapsed:.2f}s"
                     )
-                else:
+
+                elif status in (403, 429):
                     errors += 1
+                    interrupted = True
+
                     log(
-                        f"[{sid:06d}] ERROR | "
-                        f"HTTP {e.code}"
+                        f"[{sid:06d}] ACCESS RESTRICTED | "
+                        f"HTTP {status} | "
+                        f"{elapsed:.2f}s"
                     )
-
-                    if e.code in (403, 429):
-                        log("Access restricted. Stopping.")
-
                     break
 
-            except Exception as e:
+                elif status != 200:
+                    errors += 1
+                    interrupted = True
+
+                    log(
+                        f"[{sid:06d}] ERROR | "
+                        f"HTTP {status}"
+                    )
+                    break
+
+                else:
+                    # Reject unexpectedly large pages.
+                    if len(response.content) > MAX_HTML_BYTES:
+                        errors += 1
+                        interrupted = True
+
+                        log(
+                            f"[{sid:06d}] ERROR | "
+                            "HTML too large"
+                        )
+                        break
+
+                    # Do not parse redirected pages
+                    # outside the expected website.
+                    final_host = (
+                        urlparse(response.url).hostname or ""
+                    )
+
+                    if final_host not in (
+                        "djpunjab.is",
+                        "www.djpunjab.is"
+                    ):
+                        errors += 1
+                        interrupted = True
+
+                        log(
+                            f"[{sid:06d}] ERROR | "
+                            "Unexpected redirect host"
+                        )
+                        break
+
+                    song, reason = extract_song(
+                        sid,
+                        response.content,
+                        response.url
+                    )
+
+                    if song:
+                        old = songs.get(str(sid), {})
+
+                        for field in ("artist", "album"):
+                            if not song[field]:
+                                song[field] = old.get(
+                                    field, ""
+                                )
+
+                        songs[str(sid)] = song
+                        found += 1
+
+                        # A successful retry resolves
+                        # a previously recorded HTTP 400.
+                        http400_ids.discard(sid)
+
+                        log(
+                            f"[{sid:06d}] FOUND | "
+                            f"{elapsed:.2f}s | "
+                            f"Title: {song['title']} | "
+                            f"Artist: {song['artist'] or 'Unknown'} | "
+                            f"Album: {song['album'] or 'Unknown'}"
+                        )
+
+                    elif reason == "Invalid song URL":
+                        not_found += 1
+
+                        log(
+                            f"[{sid:06d}] NOT FOUND | "
+                            f"{reason} | "
+                            f"{elapsed:.2f}s"
+                        )
+
+                    else:
+                        errors += 1
+                        interrupted = True
+
+                        log(
+                            f"[{sid:06d}] UNPARSED | "
+                            f"{reason}"
+                        )
+                        break
+
+            except requests.RequestException as e:
                 errors += 1
+                interrupted = True
+
                 log(
-                    f"[{sid:06d}] ERROR | {e}"
+                    f"[{sid:06d}] NETWORK ERROR | {e}"
                 )
                 break
 
-            # Advance after FOUND, 400, 404,
-            # or a recognized invalid song URL.
+            # Advance only after an ID has been
+            # handled as FOUND or NOT FOUND.
             next_id = sid + 1
             completed += 1
 
             if completed % CHECKPOINT_EVERY == 0:
                 checkpoint(
-                    songs, next_id, http400_ids
+                    songs,
+                    next_id,
+                    http400_ids
                 )
 
             if sid < end_id:
@@ -421,20 +514,43 @@ def main():
 
     finally:
         checkpoint(
-            songs, next_id, http400_ids
+            songs,
+            next_id,
+            http400_ids
+        )
+
+        session.close()
+
+        total_time = (
+            time.perf_counter() - started_at
         )
 
         log("")
         log("========== SCAN SUMMARY ==========")
-        log(f"Found:       {found}")
-        log(f"Not found:   {not_found}")
-        log(f"Errors:      {errors}")
-        log(f"Skipped:     {skipped}")
-        log(f"Processed:   {completed}")
-        log(f"CSV records: {len(songs)}")
-        log(f"HTTP 400 IDs: {len(http400_ids)}")
-        log(f"Next ID:     {next_id}")
+        log(f"Found:          {found}")
+        log(f"Not found:      {not_found}")
+        log(f"Errors:         {errors}")
+        log(f"Skipped:        {skipped}")
+        log(f"Processed:      {completed}")
+        log(f"CSV records:    {len(songs)}")
+        log(f"HTTP 400 IDs:   {len(http400_ids)}")
+        log(f"Next ID:        {next_id}")
+        log(f"Elapsed:        {total_time:.2f}s")
+
+        if completed:
+            log(
+                f"Average per ID: "
+                f"{total_time / completed:.2f}s"
+            )
+
         log("==================================")
+
+    # Important for unattended loops:
+    # Return a failure status if a batch stopped early.
+    if interrupted or errors:
+        raise RuntimeError(
+            f"Scan interrupted at ID {next_id}"
+        )
 
 
 if __name__ == "__main__":
