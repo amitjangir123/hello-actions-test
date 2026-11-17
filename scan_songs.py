@@ -34,7 +34,7 @@ FIELDS = ["song_id", "title", "artist", "album", "url"]
 # FORMATTED LOGGING
 # ==========================================
 
-COLS = (8, 14, 9, 30, 25, 25)
+COLS = (12, 8, 14, 9, 30, 25, 25)
 
 
 def log(message):
@@ -50,8 +50,9 @@ def shorten(value, width):
 
 def print_header():
     print()
+
     headers = (
-        "ID", "STATUS", "TIME",
+        "PROGRESS", "ID", "STATUS", "TIME",
         "SONG TITLE", "ARTIST", "ALBUM"
     )
 
@@ -67,6 +68,7 @@ def print_header():
 
 
 def print_row(
+    progress,
     sid,
     status,
     elapsed,
@@ -75,6 +77,7 @@ def print_row(
     album="-"
 ):
     values = (
+        progress,
         f"{sid:06d}",
         status,
         f"{elapsed:.2f}s",
@@ -230,7 +233,6 @@ def save_http400_ids(ids):
 
 
 def checkpoint(songs, next_id, http400_ids):
-    # Save data before advancing state.
     save_csv(songs)
     save_http400_ids(http400_ids)
     save_state(next_id)
@@ -377,11 +379,16 @@ def main():
         print_header()
 
         for sid in range(start_id, end_id + 1):
+            progress = (
+                f"{sid - start_id + 1:03d}/{BATCH_SIZE}"
+            )
+
             url = f"{BASE}/song/{sid}"
 
             if not robots.can_fetch(USER_AGENT, url):
                 skipped += 1
                 interrupted = True
+
                 log(
                     f"[{sid:06d}] SKIPPED | robots.txt"
                 )
@@ -398,8 +405,6 @@ def main():
                 )
 
                 status = response.status_code
-
-                # Limit the amount of HTML downloaded.
                 html = b""
 
                 if status == 200:
@@ -427,7 +432,10 @@ def main():
                         http400_ids.add(sid)
 
                     print_row(
-                        sid, f"HTTP {status}", elapsed
+                        progress,
+                        sid,
+                        f"HTTP {status}",
+                        elapsed
                     )
 
                 elif status in (403, 429):
@@ -435,12 +443,13 @@ def main():
                     interrupted = True
 
                     print_row(
-                        sid, f"HTTP {status}", elapsed
+                        progress,
+                        sid,
+                        f"HTTP {status}",
+                        elapsed
                     )
 
-                    log(
-                        "Access restricted. Stopping."
-                    )
+                    log("Access restricted. Stopping.")
                     break
 
                 elif status != 200:
@@ -448,7 +457,10 @@ def main():
                     interrupted = True
 
                     print_row(
-                        sid, f"HTTP {status}", elapsed
+                        progress,
+                        sid,
+                        f"HTTP {status}",
+                        elapsed
                     )
                     break
 
@@ -488,6 +500,7 @@ def main():
                         found += 1
 
                         print_row(
+                            progress,
                             sid,
                             "FOUND",
                             elapsed,
@@ -500,7 +513,10 @@ def main():
                         not_found += 1
 
                         print_row(
-                            sid, "NOT FOUND", elapsed
+                            progress,
+                            sid,
+                            "NOT FOUND",
+                            elapsed
                         )
 
                     else:
@@ -508,12 +524,13 @@ def main():
                         interrupted = True
 
                         print_row(
-                            sid, "UNPARSED", elapsed
+                            progress,
+                            sid,
+                            "UNPARSED",
+                            elapsed
                         )
 
-                        log(
-                            f"Reason: {reason}"
-                        )
+                        log(f"Reason: {reason}")
                         break
 
             except (requests.RequestException, ValueError) as e:
@@ -525,18 +542,23 @@ def main():
                 )
 
                 print_row(
-                    sid, "ERROR", elapsed
+                    progress,
+                    sid,
+                    "ERROR",
+                    elapsed
                 )
+
                 log(f"Reason: {e}")
                 break
 
-            # Advance after a completed ID.
             next_id = sid + 1
             completed += 1
 
             if completed % CHECKPOINT_EVERY == 0:
                 checkpoint(
-                    songs, next_id, http400_ids
+                    songs,
+                    next_id,
+                    http400_ids
                 )
                 print_header()
 
@@ -545,8 +567,11 @@ def main():
 
     finally:
         checkpoint(
-            songs, next_id, http400_ids
+            songs,
+            next_id,
+            http400_ids
         )
+
         session.close()
 
         elapsed_total = (
