@@ -25,24 +25,71 @@ STATE_FILE = "scan_state.json"
 HTTP400_FILE = "http400_ids.csv"
 
 USER_AGENT = "PersonalMusicCatalogResearch/1.0"
-
 REQUEST_TIMEOUT = (5, 15)
 MAX_HTML_BYTES = 2 * 1024 * 1024
 
-FIELDS = [
-    "song_id",
-    "title",
-    "artist",
-    "album",
-    "url"
-]
+FIELDS = ["song_id", "title", "artist", "album", "url"]
 
 # ==========================================
-# HELPERS
+# FORMATTED LOGGING
 # ==========================================
+
+COLS = (8, 14, 9, 30, 25, 25)
+
 
 def log(message):
     print(message, flush=True)
+
+
+def shorten(value, width):
+    value = str(value or "-")
+    if len(value) > width - 1:
+        return value[:width - 4] + "..."
+    return value
+
+
+def print_header():
+    print()
+    headers = (
+        "ID", "STATUS", "TIME",
+        "SONG TITLE", "ARTIST", "ALBUM"
+    )
+
+    print(
+        "".join(
+            f"{name:<{width}}"
+            for name, width in zip(headers, COLS)
+        ),
+        flush=True
+    )
+
+    print("-" * sum(COLS), flush=True)
+
+
+def print_row(
+    sid,
+    status,
+    elapsed,
+    title="-",
+    artist="-",
+    album="-"
+):
+    values = (
+        f"{sid:06d}",
+        status,
+        f"{elapsed:.2f}s",
+        title,
+        artist,
+        album
+    )
+
+    print(
+        "".join(
+            f"{shorten(value, width):<{width}}"
+            for value, width in zip(values, COLS)
+        ),
+        flush=True
+    )
 
 
 def clean(value):
@@ -50,6 +97,10 @@ def clean(value):
         r"\s+", " ", str(value or "")
     ).strip()
 
+
+# ==========================================
+# FILE HELPERS
+# ==========================================
 
 def atomic_write_json(path, data):
     temp = path + ".tmp"
@@ -61,36 +112,6 @@ def atomic_write_json(path, data):
 
     os.replace(temp, path)
 
-
-# ==========================================
-# HTTP SESSION
-# ==========================================
-
-def create_session():
-    session = requests.Session()
-
-    session.headers.update({
-        "User-Agent": USER_AGENT,
-        "Accept": "text/html,application/xhtml+xml"
-    })
-
-    # requests.Session reuses available
-    # HTTP connections across requests.
-
-    adapter = requests.adapters.HTTPAdapter(
-        pool_connections=2,
-        pool_maxsize=2,
-        max_retries=0
-    )
-
-    session.mount("https://", adapter)
-
-    return session
-
-
-# ==========================================
-# STATE MANAGEMENT
-# ==========================================
 
 def load_state():
     if not os.path.exists(STATE_FILE):
@@ -106,14 +127,12 @@ def load_state():
         raise ValueError("Invalid next_id")
 
     log(f"Resuming from ID {next_id}")
-
     return next_id
 
 
 def save_state(next_id):
     atomic_write_json(
-        STATE_FILE,
-        {"next_id": next_id}
+        STATE_FILE, {"next_id": next_id}
     )
 
 
@@ -148,7 +167,6 @@ def load_existing():
                 }
 
     log(f"Loaded {len(songs)} songs")
-
     return songs
 
 
@@ -161,7 +179,6 @@ def save_csv(songs):
         writer = csv.DictWriter(
             f, fieldnames=FIELDS
         )
-
         writer.writeheader()
 
         for sid in sorted(songs, key=int):
@@ -188,7 +205,6 @@ def load_http400_ids():
     ) as f:
         for row in csv.DictReader(f):
             sid = row.get("song_id", "")
-
             if sid.isdigit():
                 ids.add(int(sid))
 
@@ -214,16 +230,13 @@ def save_http400_ids(ids):
 
 
 def checkpoint(songs, next_id, http400_ids):
-    # Save data before advancing the state.
-    # A crash between writes can cause rescanning,
-    # but will not intentionally skip records.
-
+    # Save data before advancing state.
     save_csv(songs)
     save_http400_ids(http400_ids)
     save_state(next_id)
 
     log(
-        f"CHECKPOINT | Next ID: {next_id} | "
+        f"\nCHECKPOINT | Next ID: {next_id} | "
         f"Songs: {len(songs)} | "
         f"HTTP 400: {len(http400_ids)}"
     )
@@ -254,8 +267,6 @@ def extract_song(song_id, html, final_url):
         return None, "Invalid song URL"
 
     soup = BeautifulSoup(html, "html.parser")
-
-    # Extract page text only once.
     text = soup.get_text(" ", strip=True)
 
     values = {}
@@ -283,15 +294,32 @@ def extract_song(song_id, html, final_url):
 
 
 # ==========================================
-# ROBOTS.TXT
+# HTTP SESSION
 # ==========================================
 
-def check_robots(session):
-    url = BASE + "/robots.txt"
+def create_session():
+    session = requests.Session()
 
+    session.headers.update({
+        "User-Agent": USER_AGENT,
+        "Accept": "text/html,application/xhtml+xml"
+    })
+
+    adapter = requests.adapters.HTTPAdapter(
+        pool_connections=2,
+        pool_maxsize=2,
+        max_retries=0
+    )
+
+    session.mount("https://", adapter)
+
+    return session
+
+
+def check_robots(session):
     try:
         response = session.get(
-            url,
+            BASE + "/robots.txt",
             timeout=REQUEST_TIMEOUT
         )
 
@@ -301,7 +329,6 @@ def check_robots(session):
         robots.parse(response.text.splitlines())
 
         log("robots.txt checked successfully")
-
         return robots
 
     except requests.RequestException as e:
@@ -320,12 +347,12 @@ def main():
     start_id = load_state()
     end_id = start_id + BATCH_SIZE - 1
 
-    log("================================")
+    log("=" * 70)
     log("DJ PUNJAB OPTIMIZED CSV SCANNER")
-    log(f"Scanning IDs {start_id} to {end_id}")
+    log(f"Scanning IDs: {start_id} to {end_id}")
     log(f"Batch size: {BATCH_SIZE}")
-    log(f"Delay: {DELAY_SECONDS}s")
-    log("================================")
+    log(f"Configured delay: {DELAY_SECONDS}s")
+    log("=" * 70)
 
     session = create_session()
 
@@ -337,7 +364,6 @@ def main():
 
     next_id = start_id
     interrupted = False
-
     started_at = time.perf_counter()
 
     try:
@@ -348,13 +374,14 @@ def main():
                 "Cannot verify crawling rules"
             )
 
+        print_header()
+
         for sid in range(start_id, end_id + 1):
             url = f"{BASE}/song/{sid}"
 
             if not robots.can_fetch(USER_AGENT, url):
                 skipped += 1
                 interrupted = True
-
                 log(
                     f"[{sid:06d}] SKIPPED | robots.txt"
                 )
@@ -366,14 +393,32 @@ def main():
                 response = session.get(
                     url,
                     timeout=REQUEST_TIMEOUT,
-                    allow_redirects=True
+                    allow_redirects=True,
+                    stream=True
                 )
+
+                status = response.status_code
+
+                # Limit the amount of HTML downloaded.
+                html = b""
+
+                if status == 200:
+                    for chunk in response.iter_content(
+                        chunk_size=16384
+                    ):
+                        html += chunk
+
+                        if len(html) > MAX_HTML_BYTES:
+                            raise ValueError(
+                                "HTML response too large"
+                            )
+
+                final_url = response.url
+                response.close()
 
                 elapsed = (
                     time.perf_counter() - request_start
                 )
-
-                status = response.status_code
 
                 if status in (400, 404):
                     not_found += 1
@@ -381,20 +426,20 @@ def main():
                     if status == 400:
                         http400_ids.add(sid)
 
-                    log(
-                        f"[{sid:06d}] NOT FOUND | "
-                        f"HTTP {status} | "
-                        f"{elapsed:.2f}s"
+                    print_row(
+                        sid, f"HTTP {status}", elapsed
                     )
 
                 elif status in (403, 429):
                     errors += 1
                     interrupted = True
 
+                    print_row(
+                        sid, f"HTTP {status}", elapsed
+                    )
+
                     log(
-                        f"[{sid:06d}] ACCESS RESTRICTED | "
-                        f"HTTP {status} | "
-                        f"{elapsed:.2f}s"
+                        "Access restricted. Stopping."
                     )
                     break
 
@@ -402,28 +447,14 @@ def main():
                     errors += 1
                     interrupted = True
 
-                    log(
-                        f"[{sid:06d}] ERROR | "
-                        f"HTTP {status}"
+                    print_row(
+                        sid, f"HTTP {status}", elapsed
                     )
                     break
 
                 else:
-                    # Reject unexpectedly large pages.
-                    if len(response.content) > MAX_HTML_BYTES:
-                        errors += 1
-                        interrupted = True
-
-                        log(
-                            f"[{sid:06d}] ERROR | "
-                            "HTML too large"
-                        )
-                        break
-
-                    # Do not parse redirected pages
-                    # outside the expected website.
                     final_host = (
-                        urlparse(response.url).hostname or ""
+                        urlparse(final_url).hostname or ""
                     )
 
                     if final_host not in (
@@ -440,9 +471,7 @@ def main():
                         break
 
                     song, reason = extract_song(
-                        sid,
-                        response.content,
-                        response.url
+                        sid, html, final_url
                     )
 
                     if song:
@@ -455,98 +484,97 @@ def main():
                                 )
 
                         songs[str(sid)] = song
+                        http400_ids.discard(sid)
                         found += 1
 
-                        # A successful retry resolves
-                        # a previously recorded HTTP 400.
-                        http400_ids.discard(sid)
-
-                        log(
-                            f"[{sid:06d}] FOUND | "
-                            f"{elapsed:.2f}s | "
-                            f"Title: {song['title']} | "
-                            f"Artist: {song['artist'] or 'Unknown'} | "
-                            f"Album: {song['album'] or 'Unknown'}"
+                        print_row(
+                            sid,
+                            "FOUND",
+                            elapsed,
+                            song["title"],
+                            song["artist"],
+                            song["album"]
                         )
 
                     elif reason == "Invalid song URL":
                         not_found += 1
 
-                        log(
-                            f"[{sid:06d}] NOT FOUND | "
-                            f"{reason} | "
-                            f"{elapsed:.2f}s"
+                        print_row(
+                            sid, "NOT FOUND", elapsed
                         )
 
                     else:
                         errors += 1
                         interrupted = True
 
+                        print_row(
+                            sid, "UNPARSED", elapsed
+                        )
+
                         log(
-                            f"[{sid:06d}] UNPARSED | "
-                            f"{reason}"
+                            f"Reason: {reason}"
                         )
                         break
 
-            except requests.RequestException as e:
+            except (requests.RequestException, ValueError) as e:
                 errors += 1
                 interrupted = True
 
-                log(
-                    f"[{sid:06d}] NETWORK ERROR | {e}"
+                elapsed = (
+                    time.perf_counter() - request_start
                 )
+
+                print_row(
+                    sid, "ERROR", elapsed
+                )
+                log(f"Reason: {e}")
                 break
 
-            # Advance only after an ID has been
-            # handled as FOUND or NOT FOUND.
+            # Advance after a completed ID.
             next_id = sid + 1
             completed += 1
 
             if completed % CHECKPOINT_EVERY == 0:
                 checkpoint(
-                    songs,
-                    next_id,
-                    http400_ids
+                    songs, next_id, http400_ids
                 )
+                print_header()
 
             if sid < end_id:
                 time.sleep(DELAY_SECONDS)
 
     finally:
         checkpoint(
-            songs,
-            next_id,
-            http400_ids
+            songs, next_id, http400_ids
         )
-
         session.close()
 
-        total_time = (
+        elapsed_total = (
             time.perf_counter() - started_at
         )
 
         log("")
-        log("========== SCAN SUMMARY ==========")
-        log(f"Found:          {found}")
-        log(f"Not found:      {not_found}")
-        log(f"Errors:         {errors}")
-        log(f"Skipped:        {skipped}")
-        log(f"Processed:      {completed}")
-        log(f"CSV records:    {len(songs)}")
-        log(f"HTTP 400 IDs:   {len(http400_ids)}")
-        log(f"Next ID:        {next_id}")
-        log(f"Elapsed:        {total_time:.2f}s")
+        log("=" * 50)
+        log("SCAN SUMMARY")
+        log("=" * 50)
+        log(f"Found:           {found}")
+        log(f"Not found:       {not_found}")
+        log(f"Errors:          {errors}")
+        log(f"Skipped:         {skipped}")
+        log(f"Processed:       {completed}")
+        log(f"CSV records:     {len(songs)}")
+        log(f"HTTP 400 IDs:    {len(http400_ids)}")
+        log(f"Next ID:         {next_id}")
+        log(f"Elapsed:         {elapsed_total:.2f}s")
 
         if completed:
             log(
-                f"Average per ID: "
-                f"{total_time / completed:.2f}s"
+                f"Average per ID:  "
+                f"{elapsed_total / completed:.2f}s"
             )
 
-        log("==================================")
+        log("=" * 50)
 
-    # Important for unattended loops:
-    # Return a failure status if a batch stopped early.
     if interrupted or errors:
         raise RuntimeError(
             f"Scan interrupted at ID {next_id}"
