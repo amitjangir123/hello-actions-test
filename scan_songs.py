@@ -3,6 +3,7 @@ import csv
 import json
 import os
 import re
+import sys
 import time
 import urllib.robotparser
 from urllib.parse import urlparse
@@ -17,7 +18,7 @@ from bs4 import BeautifulSoup
 BASE = "https://djpunjab.is"
 
 BATCH_SIZE = 100
-DELAY_SECONDS = 0.001
+DELAY_SECONDS = 2
 CHECKPOINT_EVERY = 25
 
 CSV_FILE = "songs.csv"
@@ -34,11 +35,12 @@ FIELDS = ["song_id", "title", "artist", "album", "url"]
 # FORMATTED LOGGING
 # ==========================================
 
-COLS = (12, 8, 14, 9, 30, 25, 25)
+COLS = (10, 8, 12, 8, 27, 22, 22)
 
 
 def log(message):
-    print(message, flush=True)
+    sys.stdout.write(str(message).rstrip() + "\n")
+    sys.stdout.flush()
 
 
 def shorten(value, width):
@@ -49,22 +51,18 @@ def shorten(value, width):
 
 
 def print_header():
-    print()
-
     headers = (
         "PROGRESS", "ID", "STATUS", "TIME",
         "SONG TITLE", "ARTIST", "ALBUM"
     )
 
-    print(
-        "".join(
-            f"{name:<{width}}"
-            for name, width in zip(headers, COLS)
-        ),
-        flush=True
+    line = "".join(
+        f"{name:<{width}}"
+        for name, width in zip(headers, COLS)
     )
 
-    print("-" * sum(COLS), flush=True)
+    log(line)
+    log("-" * sum(COLS))
 
 
 def print_row(
@@ -86,13 +84,13 @@ def print_row(
         album
     )
 
-    print(
-        "".join(
-            f"{shorten(value, width):<{width}}"
-            for value, width in zip(values, COLS)
-        ),
-        flush=True
+    line = "".join(
+        f"{shorten(value, width):<{width}}"
+        for value, width in zip(values, COLS)
     )
+
+    sys.stdout.write(line.rstrip() + "\n")
+    sys.stdout.flush()
 
 
 def clean(value):
@@ -238,7 +236,7 @@ def checkpoint(songs, next_id, http400_ids):
     save_state(next_id)
 
     log(
-        f"\nCHECKPOINT | Next ID: {next_id} | "
+        f"CHECKPOINT | Next ID: {next_id} | "
         f"Songs: {len(songs)} | "
         f"HTTP 400: {len(http400_ids)}"
     )
@@ -349,12 +347,12 @@ def main():
     start_id = load_state()
     end_id = start_id + BATCH_SIZE - 1
 
-    log("=" * 70)
+    log("=" * 60)
     log("DJ PUNJAB OPTIMIZED CSV SCANNER")
     log(f"Scanning IDs: {start_id} to {end_id}")
     log(f"Batch size: {BATCH_SIZE}")
     log(f"Configured delay: {DELAY_SECONDS}s")
-    log("=" * 70)
+    log("=" * 60)
 
     session = create_session()
 
