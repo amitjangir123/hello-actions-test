@@ -1,5 +1,4 @@
 
-
 import csv
 import json
 import os
@@ -27,6 +26,7 @@ PUSH_EVERY = 100
 CSV_FILE = "songs.csv"
 STATE_FILE = "scan_state.json"
 HTTP400_FILE = "http400_ids.csv"
+UNPARSED_FILE = "unparsed_ids.csv"
 
 USER_AGENT = "PersonalMusicCatalogResearch/1.0"
 REQUEST_TIMEOUT = (5, 15)
@@ -34,7 +34,7 @@ MAX_HTML_BYTES = 2 * 1024 * 1024
 
 FIELDS = ["song_id", "title", "artist", "album", "url"]
 
-COLS = (12, 8, 12, 8, 27, 22, 22)
+COLS = (16, 8, 12, 8, 27, 22, 22)
 
 
 # ==========================================
@@ -202,17 +202,17 @@ def save_csv(songs):
 
 
 # ==========================================
-# HTTP 400 TRACKING
+# HTTP 400 / UNPARSED TRACKING
 # ==========================================
 
-def load_http400_ids():
+def load_id_list(filename):
     ids = set()
 
-    if not os.path.exists(HTTP400_FILE):
+    if not os.path.exists(filename):
         return ids
 
     with open(
-        HTTP400_FILE,
+        filename,
         newline="",
         encoding="utf-8"
     ) as f:
@@ -225,8 +225,8 @@ def load_http400_ids():
     return ids
 
 
-def save_http400_ids(ids):
-    temp = HTTP400_FILE + ".tmp"
+def save_id_list(filename, ids):
+    temp = filename + ".tmp"
 
     with open(
         temp,
@@ -243,18 +243,25 @@ def save_http400_ids(ids):
         f.flush()
         os.fsync(f.fileno())
 
-    os.replace(temp, HTTP400_FILE)
+    os.replace(temp, filename)
 
 
-def checkpoint(songs, next_id, http400_ids):
+def checkpoint(
+    songs,
+    next_id,
+    http400_ids,
+    unparsed_ids
+):
     save_csv(songs)
-    save_http400_ids(http400_ids)
+    save_id_list(HTTP400_FILE, http400_ids)
+    save_id_list(UNPARSED_FILE, unparsed_ids)
     save_state(next_id)
 
     log(
         f"CHECKPOINT | Next ID: {next_id} | "
         f"Songs: {len(songs)} | "
-        f"HTTP 400: {len(http400_ids)}"
+        f"HTTP 400: {len(http400_ids)} | "
+        f"Unparsed: {len(unparsed_ids)}"
     )
 
 
@@ -271,7 +278,8 @@ def push_to_github():
             "git", "add",
             CSV_FILE,
             STATE_FILE,
-            HTTP400_FILE
+            HTTP400_FILE,
+            UNPARSED_FILE
         ],
         check=True
     )
@@ -411,7 +419,9 @@ def check_robots(session):
 
 def main():
     songs = load_existing()
-    http400_ids = load_http400_ids()
+
+    http400_ids = load_id_list(HTTP400_FILE)
+    unparsed_ids = load_id_list(UNPARSED_FILE)
 
     start_id = load_state()
     end_id = start_id + BATCH_SIZE - 1
@@ -429,6 +439,7 @@ def main():
     not_found = 0
     errors = 0
     skipped = 0
+    unparsed = 0
     completed = 0
 
     next_id = start_id
@@ -447,7 +458,7 @@ def main():
 
         for sid in range(start_id, end_id + 1):
             progress = (
-                f"{sid - start_id + 1:05d}/{BATCH_SIZE}"
+                f"{sid - start_id + 1:06d}/{BATCH_SIZE}"
             )
 
             url = f"{BASE}/song/{sid}"
@@ -455,6 +466,7 @@ def main():
             if not robots.can_fetch(USER_AGENT, url):
                 skipped += 1
                 interrupted = True
+
                 log(
                     f"[{sid:06d}] SKIPPED | robots.txt"
                 )
@@ -473,19 +485,21 @@ def main():
                 status = response.status_code
                 html = b""
 
-                if status == 200:
-                    for chunk in response.iter_content(
-                        chunk_size=16384
-                    ):
-                        html += chunk
+                try:
+                    if status == 200:
+                        for chunk in response.iter_content(
+                            chunk_size=16384
+                        ):
+                            html += chunk
 
-                        if len(html) > MAX_HTML_BYTES:
-                            raise ValueError(
-                                "HTML response too large"
-                            )
+                            if len(html) > MAX_HTML_BYTES:
+                                raise ValueError(
+                                    "HTML response too large"
+                                )
 
-                final_url = response.url
-                response.close()
+                    final_url = response.url
+                finally:
+                    response.close()
 
                 elapsed = (
                     time.perf_counter() - request_start
@@ -541,6 +555,7 @@ def main():
                     ):
                         errors += 1
                         interrupted = True
+
                         log("Unexpected redirect host")
                         break
 
@@ -560,7 +575,10 @@ def main():
                                 )
 
                         songs[str(sid)] = song
+
                         http400_ids.discard(sid)
+                        unparsed_ids.discard(sid)
+
                         found += 1
 
                         print_row(
@@ -584,8 +602,8 @@ def main():
                         )
 
                     else:
-                        errors += 1
-                        interrupted = True
+                        unparsed += 1
+                        unparsed_ids.add(sid)
 
                         print_row(
                             progress,
@@ -595,7 +613,9 @@ def main():
                         )
 
                         log(f"Reason: {reason}")
-                        break
+
+                        # Continue scanning.
+                        # Unparsed ID saved for later review.
 
             except (requests.RequestException, ValueError) as e:
                 errors += 1
@@ -622,15 +642,18 @@ def main():
                 checkpoint(
                     songs,
                     next_id,
-                    http400_ids
+                    http400_ids,
+                    unparsed_ids
                 )
 
             if completed % PUSH_EVERY == 0:
                 checkpoint(
                     songs,
                     next_id,
-                    http400_ids
+                    http400_ids,
+                    unparsed_ids
                 )
+
                 push_to_github()
                 print_header()
 
@@ -641,7 +664,8 @@ def main():
         checkpoint(
             songs,
             next_id,
-            http400_ids
+            http400_ids,
+            unparsed_ids
         )
 
         session.close()
@@ -656,16 +680,17 @@ def main():
         log("=" * 50)
         log(f"Found:           {found}")
         log(f"Not found:       {not_found}")
+        log(f"Unparsed:        {unparsed}")
         log(f"Errors:          {errors}")
         log(f"Skipped:         {skipped}")
         log(f"Processed:       {completed}")
         log(f"CSV records:     {len(songs)}")
         log(f"HTTP 400 IDs:    {len(http400_ids)}")
+        log(f"Unparsed IDs:    {len(unparsed_ids)}")
         log(f"Next ID:         {next_id}")
         log(f"Elapsed:         {elapsed_total:.2f}s")
         log("=" * 50)
 
-    # Push any remaining changes after the batch.
     push_to_github()
 
     if interrupted or errors:
