@@ -37,4 +37,4 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Scan Songs
-        run: python -u scan_songs.py
+        run: python -u scan_song_parallel.py
