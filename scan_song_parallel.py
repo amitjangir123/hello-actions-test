@@ -22,7 +22,7 @@ from bs4 import BeautifulSoup
 BASE = "https://djpunjab.is"
 
 BATCH_SIZE = 100
-CONCURRENT_REQUESTS = 5
+CONCURRENT_REQUESTS = 20
 DELAY_SECONDS = 2
 
 CHECKPOINT_EVERY = 25
